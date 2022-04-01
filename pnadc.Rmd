@@ -1,0 +1,335 @@
+---
+title: "Analisando Dados da PNAD Contínua"
+author: "Fillipe Guedes"
+date: "18/04/2021"
+output: github_document
+---
+
+# Preparando o R
+
+
+```{r}
+memory.limit(size=20000) #  Definindo limite de memoria para compilacao do programa
+options(encoding="latin1") # Definindo opcao de codificacao dos caracteres e linguagem
+options(scipen=999)#Definindo opcao de exibicao de numeros sem exponencial
+```
+
+
+# PNAD Contínua
+
+
+## Baixando os dados principais
+
+Carregando o pacote
+```{r, message=FALSE, warning=FALSE}
+library("PNADcIBGE")
+```
+
+
+Gerando microdados da PNAD Continua pelo metodo automatico. Vamos baixar dados do terceiro trimestre de 2018
+```{r, message=FALSE, warning=FALSE}
+variaveis_selecionadas <- c("V2007", "V2009", "V2010", "VD3004", "VD4019", "VD4031", "V1028")
+dadosPNADc <- get_pnadc(year=2018, quarter=3, labels=TRUE, deflator=TRUE, design=FALSE, vars=variaveis_selecionadas)
+```
+Dado o número de linhas, a PNADc entrevistou 559.761 pessoas.
+
+
+## Encontrando Estatísticas Básicas (estimativas populacionais)
+
+
+Obtendo total e media da renda mensal habitual para a amostra da base de coleta
+```{r}
+sum(x=dadosPNADc$VD4019, na.rm=TRUE)
+mean(x=dadosPNADc$VD4019, na.rm=TRUE)
+```
+Entretanto, \textbf{não} é desta maneira que devemos calcular estimativas de pesquisas amostrais complexas. Como nem todos respondem às mesmas perguntas do questionário, temos informações NA nos dados e, por isso, devemos trabalhar com o argumento na.rm=TRUE para remover os NAs.
+
+
+Devemos, então, aplicar o desenho amostral nos microdados
+```{r}
+dadosPNADc <- pnadc_design(data_pnadc=dadosPNADc)
+```
+
+Agora, temos uma estrutura de dados amostrais complexo
+```{r}
+class(dadosPNADc)
+```
+
+
+O desenho amostral também pode ser criado manualmente. Para especificar o desenho da amostra, é necessário identificar a unidade primária de amostragem (UPA) no argumento ids, o estrato no argumento strata, e os pesos dos domicílios no argumento weights. Essas variáveis podem ser obtidas no dicionário. Note que existem dois pesos, o V1027 e o V1028. O segundo é o peso pós-estratificação, que é o que utilizaremos. Se você utilizar o primeiro peso, deve realizar a estratificação manualmente através do comando postStratify. 
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(srvyr)
+```
+
+```{r}
+pnad_design <- dadosPNADc %>%
+     as_survey_design(
+         ids = UPA,
+         strata = Estrato,
+         weights = V1028,
+         nest = TRUE
+     )
+
+```
+A vantagem de usar o passo acima é que podemos usar a sintaxe do pacote dplyr em dados amostrais complexos. 
+
+
+Para estimativas de estruturas de dados amostrais complexas \textbf{em nível populacional} para a base de dados gerada a partir do comando pnadc_design, precisamos carregar o pacote survey. Para o caso manual acima, trabalhamos com o pacote srvyr
+
+```{r, message=FALSE, warning=FALSE}
+library("survey")
+library(srvyr) 
+```
+
+Estimando total da renda mensal habitual
+```{r}
+totalrenda <- svytotal(x=~VD4019, design=dadosPNADc, na.rm=TRUE)
+totalrenda
+```
+
+No caso manual, temos
+```{r}
+pnad_design %>%
+     summarise(Total = survey_total(x = VD4019, vartype = "ci", na.rm=T))
+```
+
+Vemos, assim, que há uma expressiva diferença em relação a renda total calculada anteriormente. Portanto, quando estamos trabalhando com pesquisas domiciliares precisamos necessariamente inserir o desenho amostral para calcular estimativas populacionais.
+
+Exibindo coeficiente de variacao e intervalo de confianca para o caso automático
+```{r}
+cv(totalrenda)
+confint(totalrenda)
+``` 
+
+
+Podemos também trabalhar com mais de uma variável. Estimando o total de pessoas por sexo e cor.
+```{r}
+totalsexoraca <- svytotal(x=~V2007 + V2010, design=dadosPNADc, na.rm=TRUE)
+totalsexoraca
+
+# Para o caso manual, 
+
+pnad_design %>%
+    group_by(V2007) %>%
+    summarise(Total = survey_total( na.rm = T, vartype = "ci"))
+
+pnad_design %>%
+    group_by(V2010) %>%
+    summarise(Total = survey_total( na.rm = T, vartype = "ci"))
+```
+Portanto, na pesquisa em questão estima-se que tinhamos 100.438.773 homens na população e 107.621.854 mulheres. Adicionalmente, 90.087.231 pessoas brancas. O mesmo raciocínio se aplica às demais variáveis.
+
+
+
+Para verificarmos interseção entre as variáveis sexo e cor, usamos a seguinte função
+```{r}
+totalsexoraca_interacao <- svytotal(~interaction(V2007, V2010), design=dadosPNADc, na.rm=TRUE)
+totalsexoraca_interacao
+
+# Para o outro caso
+
+pnad_design %>%
+    group_by(V2007, V2010) %>%
+    summarise(Total = survey_total(vartype = "ci"))
+
+```
+
+
+Existem duas formas de se obter médias em pesquisas amostrais complexas, as médias de variáveis contínuas e médias de variáveis categórica. Vamos trabalhar com o primeiro caso agora, então, estimando media da renda mensal habitual temos:
+```{r}
+mediarenda <- svymean(x=~VD4019, design=dadosPNADc, na.rm=TRUE)
+mediarenda
+
+pnad_design %>%
+    summarise(Total = survey_mean(x=VD4019, na.rm = T, vartype = "ci"))
+
+```
+A média da renda mensal habitual é de 2224 reais, que é bem diferente da obtida anteriormente.
+
+
+Para médias de variáveis categóricas, devemos estimar a proporção. Estimando proporcao de sexo
+```{r}
+propsexo <- svymean(x=~V2007, design=dadosPNADc, na.rm=TRUE)
+propsexo
+
+pnad_design %>%
+    group_by(V2007) %>%
+    summarise(Total = survey_prop(na.rm = T, vartype = "ci"))
+
+```
+
+Estimando a mediana (quantil 0.5) e quantis (1o quantil = 0,25 e 3o quantil igual a 0,75) da renda mensal habitual. Adicionalmente, vamos perdir os percentis 90, 95 e 98.
+```{r}
+medianarenda <- svyquantile(x=~VD4019, design=dadosPNADc, quantiles=c(0.25, 0.5, 0.75, 0.9, 0.95, 0.98), na.rm=TRUE)
+medianarenda
+
+
+pnad_design %>%
+    summarise(Total = survey_quantile(x = VD4019, quantiles = c(0.25, 0.5, 0.75, 0.9, 0.95, 0.98), na.rm = T, vartype = "ci"))
+
+```
+Assim, vemos que no primeiro trimestre de 2018, metade da população recebia até 1.300 reais e 95% da população recebia até 7000 reais
+
+Podemos também fazer recortes dentro dos microdadas. Estimando a renda media para mulheres acima de 30 anos
+```{r}
+rendaM30 <- svymean(x=~VD4019, design=subset(dadosPNADc, V2007 == "Mulher" & V2009 > 30), na.rm=TRUE)
+rendaM30
+
+pnad_design %>%
+  filter(V2007 == 'Mulher' & V2009>30) %>%
+    summarise(Total = survey_mean(x = VD4019, na.rm = T, vartype = "ci"))
+
+
+```
+A renda para mulheres acima de 30 anos no Brasil é de 2120 reais.
+
+
+Agora, vamos fazer uma estimativa usando o nível de uma outra variável. Estimando a frequencia relativa de homens e mulheres em cada nivel de instrucao
+```{r}
+freqSexoInstr <- svyby(formula=~V2007, by=~VD3004, design=dadosPNADc, FUN=svymean, na.rm=TRUE, vartype=NULL)
+print(freqSexoInstr, row.names=FALSE)
+
+pnad_design %>%
+     group_by(VD3004, V2007) %>%
+     summarise(Total = survey_prop(na.rm = T, vartype = "ci"))
+```
+para pessoas com o menor nível de instrução, 51% eram mulheres e 49% eram homens.
+
+
+## Gráficos Básicos
+
+Esbocando boxplot do numero médio de horas trabalhadas por sexo
+```{r}
+svyboxplot(formula=VD4031 ~ V2007, design=dadosPNADc)
+
+```
+
+
+Esbocando histograma da distribuicao de frequencia do numero de horas trabalhadas
+```{r}
+svyhist(formula=~as.numeric(VD4031), design=dadosPNADc, main="Histograma", xlab="Número de Horas Trabalhadas", ylab="Densidade")
+```
+
+Esbocando grafico de dispersao entre numero de horas trabalhadas e renda mensal habitual
+```{r}
+svyplot(formula=VD4019 ~ VD4031, design=dadosPNADc, style="transparent", xlab="Horas habitualmente trabalhadas", ylab="Rendimento habitual")
+```
+
+
+## Testes Estatísticos
+
+Assim, como gráficos, dentro do pacote survey também podemos realizar testes estatísticos. Realizando teste t de student para verificar se existe diferenca de rendimentos entre sexos
+
+```{r}
+svyttest(formula=VD4019 ~ V2007, design=dadosPNADc)
+```
+Assim, rejeitamos a hipótese nula de que a diferença entre as médias é igual a 0. Ou seja, há diferenciais salariais.
+
+
+## Taxa de Ocupação / Desocupação
+
+Uma das informações mais importantes que é divulgada pela pesquisa PNAD Contínua é a taxa de desemprego no Brasil. Vejamos abaixo a figura recentemente publicada pelo IBGE.
+
+![Desocupação](Imagens/desocup.JPG "Desocupação")
+
+
+Vamos ver como calcular esta estatística com os pacotes aqui apresentados. Carregando dados do 3o trimestre de 2019
+
+```{r}
+dadosPNADc_32019 <- get_pnadc(year=2019, quarter=3, labels=TRUE, deflator=TRUE, design=FALSE)
+
+dadosPNADc_32019 <- dadosPNADc_32019 %>%
+     as_survey_design(
+         ids = UPA,
+         strata = Estrato,
+         weights = V1028,
+         nest = TRUE
+     )
+```
+
+Vejamos agora gerar a proporção de ocupados e desocupados
+```{r}
+dadosPNADc_32019 %>%
+    group_by(VD4002) %>%
+    filter(!is.na(VD4002)) %>%
+    summarise(Des = survey_prop(vartype = "ci", na.rm = T))
+```
+Portanto, vimos que a proporção de desocupados é de 11,8% da população, assim como exibido pela notícia.
+
+
+Para verificar o total de pessoas ocupadas e desocupadas, fazemos
+```{r}
+dadosPNADc_32019 %>%
+    group_by(VD4002) %>%
+    filter(!is.na(VD4002)) %>%
+    summarise(Des = survey_total(vartype = "ci", na.rm = T))
+```
+Assim, são 12,5 milhões de pessoas desocupadas no total
+
+## Coletando Informações da PNADC diretamente da SIDRA (pacote sidrar)
+
+Podemos também usar diretamente a fonte de informações da SIDRA para coletar dados da PNADC. Para isto, devemos usar o pacote sidrar
+
+```{r message=FALSE, warning=FALSE}
+library(sidrar)
+```
+
+Vamos refazer o exercício feito anteriormente, só que agora, vamos usar os dados da PNADC coletados diretamente da base de dados da SIDRA. A tabela que fornece a Taxa de Desocupação para a população Total é a 6397.
+
+```{r}
+Tx_Desocupacao <- get_sidra(x = 6397,
+                 variable = 4099, 
+                 classific = c('C58'), 
+                 category = list(95253),
+                 geo = "Brazil",
+                 period = '201903',
+                 header = TRUE,
+                 format = 1) %>%
+  rename('Tx Desocupação' = Valor)
+
+# Para consulta da classificação e do código, devemos clicar no botão de'Opções Avançadas' que fica no fim da página da tabela (https://sidra.ibge.gov.br/tabela/6397) 
+
+Tx_Desocupacao$`Tx Desocupação`
+```
+Portanto, chegamos ao mesmo valor através da consulta direta.
+
+\textbf{O Sidra, portanto, fornece os dados da PNADC já preparados para consulta em sua plataforma, sem que seja necessário fazer qualquer outra manipulação. Para acessar todas as tabelas da PNADC, ver \link{https://sidra.ibge.gov.br/pesquisa/pnadct/tabelas}} . 
+
+
+## Microdados Anuais
+
+Existem também formas de carregar os dados do PNAD Contínua filtrando a partir de outras informações. Carregando microdados anuais da PNAD Continua da primeira visita de 2018
+```{r}
+PNADcAnual_Visita <- get_pnadc(year=2018, interview=1, labels=TRUE, deflator=TRUE, design=TRUE, defyear=2019)
+```
+
+Se quisermos o microdado anual de 2018 para um tópico específico, utilizamos 
+```{r}
+PNADcAnual_Trimestre <- get_pnadc(year=2018, topic=2, labels=TRUE, deflator=TRUE, design=TRUE, defyear=2019, defperiod=2)
+```
+No caso acima, temos temas que foram coletados apenas no segundo trimestre de 2018
+
+Trabalhar com Infomações sobre domicílio ao invés de informação por habitante
+```{r}
+svymean(x=~VD5008, design = subset(PNADcAnual_Visita, V2005 == 'Pessoa responsável pelo domicílio'), na.rm=TRUE)
+```
+Vemos que a média de rendimentos por domicílio é 1583 reais. Portanto, a estimativa a nível domiciliar DEVE SER FEITA DESTA MANEIRA, conforme orientação do IBGE.
+
+PARA MAIS INFORMAÇÕES SOBRE O PACOTE SURVEY, RODAR O CÓDIGO
+```{r}
+help(survey)
+```
+
+
+
+# Referências
+
+
+ Blog do professor Regis Ely \url{http://regisely.com/blog/mercado-de-trabalho-covid/}
+
+ Aula do professor Marconi Souza \url{https://repositorio.enap.gov.br/bitstream/1/4643/3/2019-11-26%20-%20Microdados%20PNADC.pdf}
+
+ Material online do Douglas Braga \url{https://rpubs.com/BragaDouglas/335574}
+
+ Live do Gabriel Henrique \url{https://www.youtube.com/watch?v=2qI010nVdls&t=5060s}
